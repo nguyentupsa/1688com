@@ -1,0 +1,37 @@
+--- state_machine.py.orig
++++ state_machine.py
+@@ -190,6 +190,20 @@
+         # 2) Ensure login mà không điều hướng sản phẩm (để S1 xử lý)
+-        await playwright_driver.ensure_login_via_taobao(
+-            page,
+-            timeout_s=300,
+-            next_url=None,
+-            force_show_login=True
+-        )
++        offer_url = playwright_driver.normalize_1688_product_url(product_url)
++        res = await playwright_driver.ensure_login_via_taobao(page, timeout_s=300, next_url=offer_url)
++        if not res.get("ok"):
++            import logging
++            logger = logging.getLogger(__name__)
++            logger.error("Login not settled — please finish login then press Retry")
++            raise RuntimeError("Login not settled")
++
++        logger.info("✅ Login settled. Navigating to offer…")
++
++        # Đảm bảo đã ở trang sản phẩm
++        try:
++            # một số selector ổn trên 1688 detail
++            await page.wait_for_selector('#mod-detail-bd, .d-content, [data-spm*="detail"]', timeout=15000)
++        except Exception:
++            logger.warning("Offer page not ready — reloading once")
++            await page.reload(wait_until="domcontentloaded")
+
+         # 3) Product + Chat
+-        await _s1_open_product_and_open_chat(page, product_url)
++        # Từ đây tiếp tục open chat / nhập tin nhắn…
++        ok_chat = await playwright_driver.ensure_chat_ready(page=page, max_s=15)
++        if not ok_chat:
++            logger.error("No chat input found — 请点击进入店铺聊天/或刷新页面")
++            raise RuntimeError("Chat not ready")
++
++        await _s1_open_product_and_open_chat(page, product_url)

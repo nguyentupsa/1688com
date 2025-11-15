@@ -1,0 +1,62 @@
+--- state_machine.py.orig
++++ state_machine.py
+@@ -7,6 +7,8 @@
+ from pathlib import Path
+ from types import SimpleNamespace as _SNS
+
+ from playwright_driver import playwright_driver
++import logging
++import asyncio
+
+ # ============== Paths & Data dirs ==============
+ DATA_DIR = Path("/app/data")
+@@ -30,6 +32,8 @@
+ }
+ _lock = asyncio.Lock()
+
++logger = logging.getLogger(__name__)
++
+ # === Manual gates so FE/operator can confirm before next step ===
+ _gates = {}  # name -> asyncio.Event
+
+@@ -210,6 +214,26 @@
+         # 2) Ensure login mà không điều hướng sản phẩm (để S1 xử lý)
+         await playwright_driver.ensure_login_via_taobao(
+             page,
+             timeout_s=300,
+             next_url=offer_url,
+             force_show_login=True
+         )
+
++        logger.info(f"[STATE] Login completed for product: {offer_url}")
++
++        # Đợi trang sản phẩm sẵn sàng để không "đứng im"
++        try:
++            from playwright_driver import _wait_offer_ready
++            ok_offer = await _wait_offer_ready(page, timeout_ms=15000)
++            if not ok_offer:
++                logger.warning("[STATE] Offer page not ready, reloading...")
++                await page.reload(wait_until="domcontentloaded")
++                ok_offer = await _wait_offer_ready(page, timeout_ms=12000)
++
++            if not ok_offer:
++                logger.error("❌ Không vào được trang sản phẩm sau đăng nhập – hãy mở thủ công rồi bấm Resume.")
++                raise RuntimeError("Product page not ready after login")
++
++            logger.info("✅ Offer ready – tiếp tục mở chat…")
++        except Exception as e:
++            logger.error(f"[STATE] Error checking offer readiness: {e}")
++            raise
+
+         # 3) Product + Chat
+         await _s1_open_product_and_open_chat(page, product_url)
+
+@@ -152,6 +166,7 @@
+ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: str = "Aggressive"):
+     """Bắt đầu 1 phiên thương lượng (one-shot)."""
++    logger.info(f"[STATE] Starting negotiation - Product: {product_url}, Style: {style}")
++
+     async with _lock:
+         if _state["status"] == "running":
++            logger.warning("[STATE] Another session is already running")
+             raise RuntimeError("A session is already running")

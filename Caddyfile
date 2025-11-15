@@ -1,0 +1,134 @@
+{
+	email {$ACME_EMAIL:auto@localhost}
+}
+
+sms-agent.shopquantum.ai {
+	encode gzip zstd
+	
+	reverse_proxy sms-campaign-app-prod:8008 {
+		header_down Cache-Control "no-cache, no-store, must-revalidate"
+		header_down Pragma "no-cache"
+		header_down Expires "0"
+	}
+	
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Content-Security-Policy "frame-ancestors 'self';"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-XSS-Protection "1; mode=block"
+	}
+}
+
+# Customer Support Agent configuration
+customer-support-agent.shopquantum.ai {
+	encode gzip zstd
+
+	# API routes - proxy to backend on port 3008
+	reverse_proxy /agent/* psa-customer-support-backend:3008 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Static files - proxy to frontend on port 8003
+	reverse_proxy /static/* psa-customer-support-frontend:8003 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Favicon - proxy to frontend on port 8003
+	reverse_proxy /favicon* psa-customer-support-frontend:8003 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Proxy to Flask frontend on port 8003 (catch-all)
+	reverse_proxy psa-customer-support-frontend:8003 {
+		# WebSocket support
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Content-Security-Policy "frame-ancestors 'self';"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-XSS-Protection "1; mode=block"
+	}
+}
+
+{$DOMAIN} {
+
+    # API and backend routes - highest priority, no caching
+    reverse_proxy /api/* backend:8000 {
+        header_down Cache-Control "no-cache, no-store, must-revalidate"
+        header_down Pragma "no-cache"
+        header_down Expires "0"
+    }
+
+    reverse_proxy /health backend:8000 {
+        header_down Cache-Control "no-cache, no-store, must-revalidate"
+        header_down Pragma "no-cache"
+        header_down Expires "0"
+    }
+
+    # WebSocket logs – quay lại port 8000
+    reverse_proxy /ws/* backend:8000 {
+        header_up Connection "upgrade"
+        header_up Upgrade "websocket"
+    }
+
+    reverse_proxy /app/api/* backend:8000 {
+        header_down Cache-Control "no-cache, no-store, must-revalidate"
+        header_down Pragma "no-cache"
+        header_down Expires "0"
+    }
+
+    reverse_proxy /app/health backend:8000 {
+        header_down Cache-Control "no-cache, no-store, must-revalidate"
+        header_down Pragma "no-cache"
+        header_down Expires "0"
+    }
+
+    reverse_proxy /app/ws/* backend:8000 {
+        header_up Connection "upgrade"
+        header_up Upgrade "websocket"
+        header_down Cache-Control "no-cache, no-store, must-revalidate"
+        header_down Pragma "no-cache"
+        header_down Expires "0"
+    }
+
+    reverse_proxy /docs backend:8000
+    reverse_proxy /openapi.json backend:8000
+
+    # VNC HTML – strip /vnc prefix
+    handle_path /vnc/* {
+        reverse_proxy backend:6901
+    }
+
+    # VNC WebSocket
+    reverse_proxy /websockify backend:6901
+
+    # Frontend static files (catch-all)
+    root * /srv/frontend
+    encode gzip zstd
+    file_server
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Content-Security-Policy "frame-ancestors 'self';"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-XSS-Protection "1; mode=block"
+    }
+}
+

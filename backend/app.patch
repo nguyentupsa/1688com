@@ -1,0 +1,28 @@
+--- app.py.orig
++++ app.py
+@@ -9,7 +9,7 @@
+ from contextlib import asynccontextmanager
+
+-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
++from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+ from starlette.websockets import WebSocketState
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse
+@@ -445,6 +445,20 @@
+         return {"ok": False, "message": f"Failed to get artifacts: {str(e)}"}
+
++@app.post("/api/gate/open")
++async def api_gate_open(name: str = Query(..., min_length=3)):
++    from state_machine import gate_open
++    gate_open(name)
++    return {"ok": True, "gate": name}
++
++@app.post("/api/gate/reset")
++async def api_gate_reset(name: str = Query(..., min_length=3)):
++    from state_machine import gate_reset
++    gate_reset(name)
++    return {"ok": True, "gate": name}
++
+ @app.websocket("/ws/logs")
+ async def websocket_endpoint(websocket: WebSocket):
+     """WebSocket endpoint for real-time log streaming."""

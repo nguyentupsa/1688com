@@ -1,0 +1,37 @@
+--- app.py.orig
++++ app.py
+@@ -219,6 +219,7 @@
+ @app.post("/api/negotiate/start")
+ async def start_negotiation(request: NegotiationRequest) -> NegotiationStartResponse:
+     """Start a new negotiation session."""
+     try:
++        logger.info("[API] Starting negotiation request received")
+         if state_machine.is_running():
+             current_state_value = getattr(state_machine.current_session, "current_state", None)
++            logger.warning(f"[API] Negotiation already in progress, current state: {current_state_value}")
+             return NegotiationStartResponse(
+                 ok=False,
+                 message="Another negotiation is already in progress",
+                 current_state=current_state_value
+             )
+
+         logger.info(f"[API] 🚀 Starting negotiation for {request.product_url}")
+
+@@ -260,6 +261,8 @@
+         # Start negotiation (this is the real API)
+         result = await state_machine.start(product_url, opener_text, int(max_turns), style)
++        logger.info(f"[API] Negotiation started successfully with session: {result.get('session_id')}")
+         return NegotiationStartResponse(
+             ok=True,
+             session_id=getattr(state_machine.current_session, "id", None),
+             message=f"Session started: {result.get('session_id')}",
+             current_state=getattr(state_machine.current_session, "current_state", None)
+         )
+
+     except Exception as e:
++        logger.error(f"[API] Error starting negotiation: {type(e).__name__}: {str(e)}")
++        logger.debug(f"[API] Full traceback: {traceback.format_exc()}")
+         return NegotiationStartResponse(
+             ok=False,
+             message=f"Failed to start negotiation: {str(e)}"
+         )

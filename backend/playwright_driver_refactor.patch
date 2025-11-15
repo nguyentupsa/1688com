@@ -1,0 +1,316 @@
+--- playwright_driver.py.orig
++++ playwright_driver.py
+@@ -8,6 +8,7 @@
+ from playwright.async_api import async_playwright
+ import re
+ from urllib.parse import urlparse, parse_qs
++import logging
+ # ========= ENV & PATHS =========
+ if not os.environ.get('DISPLAY'):
+     os.environ['DISPLAY'] = ':99'
+@@ -22,6 +23,13 @@
+ LOGIN_JUMP_ROUTE = "**/_____tmd_____/page/login_jump**"
+
+ # Global flag to control tab closing during login
++_CLOSE_NEW_TABS_DURING_LOGIN = False
++
++# Noise filter for console logs
++NOISY = [
++    "Permissions policy violation", "APLUS", "deviceorientation",
++    "日志上报失败", "ScriptProcessorNode", "gyroscope", "accelerometer"
++]
+
+ # --- add near the top of file ---
+ LOGIN_SELECTORS = [
+@@ -33,6 +41,10 @@
+     'a[href*="login.1688.com"]',
+     'a[href*="login.taobao.com"]',
+     'div._buttonWrap_1p2az_60 img[src*="O1CN01ZaHib31lWomw16ded"]'  # nút bạn chỉ định
+ ]
++
++logger = logging.getLogger(__name__)
++
+ # ========= Helpers =========
+ async def _shot(page, tag):
+     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+@@ -490,6 +502,58 @@
+                 await btn.click()
+         except Exception:
+             pass
++
++async def _is_login_modal_visible(page):
++    """Check if login modal/popup is still visible"""
++    selectors = [
++        "text=扫码登录", "text=密码登录", "input[type='password']",
++        "div.qrlogin", "div.login-content", "img[src*='login']",
++        "[class*='login'] [class*='qrcode']", "[data-login-version]"
++    ]
++    for sel in selectors:
++        try:
++            if await page.locator(sel).first.is_visible():
++                return True
++        except Exception:
++            pass
++    return False
++
++async def wait_login_modal_gone(page, stable_ms=1500, timeout_s=120):
++    """Wait until login modal disappears and stays hidden for stable_ms"""
++    stable_start = None
++    start = asyncio.get_event_loop().time()
++    logger.info("[LOGIN] Waiting for login modal to disappear...")
++
++    while asyncio.get_event_loop().time() - start < timeout_s:
++        visible = await _is_login_modal_visible(page)
++        if not visible:
++            if stable_start is None:
++                stable_start = asyncio.get_event_loop().time()
++                logger.info("[LOGIN] Modal disappeared, checking stability...")
++            elif (asyncio.get_event_loop().time() - stable_start) * 1000 >= stable_ms:
++                logger.info("[LOGIN] Modal gone and stable for 1.5s")
++                await _shot(page, 'login_modal_gone_stable')
++                return
++        else:
++            stable_start = None
++        await asyncio.sleep(0.2)
++
++    logger.error("[LOGIN] Timeout waiting for modal to disappear")
++    raise TimeoutError("Login modal still visible after timeout")
++
++async def wait_for_chat_ready(page, timeout_s=25):
++    """Wait until chat input is ready (visible)"""
++    sels = [
++        'pre.edit[contenteditable="true"]',
++        'textarea', '[contenteditable="true"]', 'div[role="textbox"]',
++        '.im-textarea,.msg-editor textarea,.chat-input textarea'
++    ]
++    start = asyncio.get_event_loop().time()
++    logger.info("[CHAT] Waiting for chat input to be ready...")
++
++    while asyncio.get_event_loop().time() - start < timeout_s:
++        # Check main page
++        for sel in sels:
++            try:
++                if await page.locator(sel).first.is_visible():
++                    logger.info(f"[CHAT] Chat input ready on main page ({sel})")
++                    await _shot(page, 'chat_input_ready_main')
++                    return
++            except Exception:
++                pass
++
++        # Check frames
++        for frame in page.frames:
++            u = frame.url or ''
++            if any(k in u for k in ['im','aliim','chat','message']):
++                for sel in sels:
++                    try:
++                        if await frame.locator(sel).first.is_visible():
++                            logger.info(f"[CHAT] Chat input ready in frame ({sel})")
++                            await _shot(page, 'chat_input_ready_frame')
++                            return
++                    except Exception:
++                        pass
++
++        await asyncio.sleep(0.5)
++
++    logger.error("[CHAT] Timeout waiting for chat input")
++    await _shot(page, 'chat_input_timeout')
++    raise TimeoutError("Chat UI not ready")
++
+ async def wait_for_supplier_reply_canonical(page, timeout_s: int = 180):
+     end = asyncio.get_event_loop().time() + timeout_s
+     last_shot_t = 0
+@@ -565,6 +629,8 @@
+     await page.goto("https://www.1688.com/", wait_until="domcontentloaded")
+
+     # Bật flag để đóng tab mới trong login phase
++    global _CLOSE_NEW_TABS_DURING_LOGIN
+     _CLOSE_NEW_TABS_DURING_LOGIN = True
+
++    logger.info("[LOGIN] Starting login process on 1688.com")
++
+     # --- inside ensure_login_via_taobao(...) after goto 1688 and page is idle ---
+     # 0) đảm bảo ở homepage và hiển thị vùng nút
+     try:
+@@ -576,6 +642,8 @@
+     # 1) thử click các nút login phổ biến
+     clicked_login = False
+     for sel in LOGIN_SELECTORS:
++        logger.info(f"[LOGIN] Trying selector: {sel}")
+         try:
+             el = await page.wait_for_selector(sel, timeout=1500, state="visible")
+             try:
+@@ -585,10 +653,12 @@
+                 )
+             clicked_login = True
+             await _shot(page, 'login_btn_clicked')
++            logger.info(f"[LOGIN] Successfully clicked login button: {sel}")
+             break
+         except Exception:
++            logger.debug(f"[LOGIN] Failed to click selector: {sel}")
+             continue
+
+@@ -603,6 +673,8 @@
+     # 3) chờ popup login hiện (đừng redirect đi nơi khác)
+     if clicked_login:
++        logger.info("[LOGIN] Waiting for login popup to appear...")
+         try:
+             # các dấu hiệu popup: qrcode / form / title
+             await page.wait_for_selector(
+@@ -610,10 +682,13 @@
+                 timeout=5000
+             )
+             await _shot(page, 'login_popup_visible')
++            logger.info("[LOGIN] Login popup detected and visible")
+         except Exception:
++            logger.warning("[LOGIN] Did not detect popup, retrying...")
+             # không thấy popup thì thử lại 1 lần nữa với selector mạnh
+             for sel in LOGIN_SELECTORS:
++                logger.info(f"[LOGIN] Retry with selector: {sel}")
+                 try:
+                     el = await page.wait_for_selector(sel, timeout=1500, state="visible")
+                     await el.click(); await _shot(page,'login_btn_clicked_retry'); break
+@@ -649,10 +724,14 @@
+         # Nếu thấy dấu hiệu đã đăng nhập → hoàn thành login
+         if await _looks_logged_in(page):
+             await _shot(page, 'logged_in_ui_detected')
++            logger.info("[LOGIN] User logged in detected via UI")
+             await wait_login_modal_gone(page, stable_ms=1500, timeout_s=120)
+             _CLOSE_NEW_TABS_DURING_LOGIN = False
++            logger.info("[LOGIN] Login process completed successfully")
+             return
+
++        logger.debug("[LOGIN] Still waiting for login...")
++
+         # Chờ captcha/nhập liệu nếu cần
+         try:
+             await detect_and_wait_captcha(page, timeout_ms=3000)
+@@ -661,10 +740,15 @@
+         # Chờ nhẹ tránh spam requests
+         await asyncio.sleep(0.5)
++    except TimeoutError as te:
++        logger.error(f"[LOGIN] {te}")
++        _CLOSE_NEW_TABS_DURING_LOGIN = False
++        raise
+     except Exception:
++        logger.error("[LOGIN] Unexpected error during login")
+         _CLOSE_NEW_TABS_DURING_LOGIN = False
+         raise
+     finally:
+         _CLOSE_NEW_TABS_DURING_LOGIN = False
+@@ -672,8 +756,6 @@
+     # Nếu hết thời gian mà chưa login thành công
+     if not await _looks_logged_in(page):
++        logger.error("[LOGIN] Login failed - timeout")
+         raise RuntimeError("Login not completed in time")
+
+     # Tắt flag đóng tab mới sau khi login xong
+@@ -689,6 +771,7 @@
+     # 4) Chỉ điều hướng về Work Home nếu không phải force_show_login
+     if not force_show_login:
++        logger.info("[LOGIN] Navigating to Work Home")
+         await page.goto(WORK_HOME, wait_until="domcontentloaded")
+         try:
+             await page.wait_for_url(r"^https://work\.1688\.com/", timeout=8000)
+@@ -704,6 +787,8 @@
+
+ async def open_chat_from_product_canonical(page, product_url: str, timeout_s: int = 90):
++    logger.info(f"[CHAT] Opening chat for product: {product_url}")
++
+     try:
+         product_url = normalize_1688_product_url(product_url)
+     except Exception:
+@@ -714,6 +799,7 @@
+     await detect_and_wait_captcha(page)
+     selectors = [
+         'od-text[i18n="wangwang"]',  # Thêm selector theo yêu cầu
++        'div._buttonWrap_1p2az_60 img[src*="O1CN01ZaHib31lWomw16ded"]',  # backup login button
+         'text=客服','text=联系','text=咨询','text=联系供应商',
+         'button:has-text("客服")','[data-title*=客服]','[aria-label*=客服]',
+         '.contact-supplier,.customer-service,.im-chat,.im-btn'
+@@ -721,10 +807,13 @@
+     for sel in selectors:
++        logger.info(f"[CHAT] Trying chat selector: {sel}")
+         try:
+             btn = await page.wait_for_selector(sel, timeout=3000)
+             await btn.click()
+             await _shot(page, 'chat_clicked')
++            logger.info(f"[CHAT] Successfully clicked chat button: {sel}")
+             break
+         except Exception:
++            logger.debug(f"[CHAT] Failed to click chat selector: {sel}")
+             continue
+
+     try:
+@@ -740,6 +829,8 @@
+
+ async def send_on_chat_precise_canonical(page, text: str):
++    logger.info(f"[CHAT] Sending message: {text[:50]}...")
++
+     input_selectors = [
+         'pre.edit[contenteditable="true"]',  # Thêm selector theo yêu cầu
+         'textarea','[contenteditable="true"]','div[role="textbox"]',
+@@ -747,10 +838,12 @@
+     ]
+     send_selectors = [
+         'text=发送','text=Send','button:has-text("发送")','button:has-text("Send")',
+         '.send-btn,.im-send-btn,.chat-send-btn'
+     ]
+
+     typed = False
+     for sel in input_selectors:
++        logger.info(f"[CHAT] Trying input selector: {sel}")
+         try:
+             el = await page.wait_for_selector(sel, timeout=2000)
+             await el.click(); await el.fill(''); await el.type(text)
+             await _shot(page, 'chat_text_typed'); typed = True; break
+         except Exception:
+             continue
+     if not typed:
++        logger.error("[CHAT] No chat input found")
+         raise RuntimeError('No chat input found')
+
++    logger.info("[CHAT] Message typed successfully")
++
+     for sel in send_selectors:
++        logger.info(f"[CHAT] Trying send selector: {sel}")
+         try:
+             btn = await page.wait_for_selector(sel, timeout=1500)
+             await btn.click(); await _shot(page, 'chat_text_sent_btn'); return True
+         except Exception:
+             continue
+
+     try:
+         await page.keyboard.press('Enter')
+         await _shot(page, 'chat_text_sent_enter')
++        logger.info("[CHAT] Message sent via Enter key")
+         return True
+     except Exception:
+         pass
+
++    logger.error("[CHAT] Failed to send message")
+     raise RuntimeError('Could not send message (send_on_chat_precise_canonical)')
+
+@@ -823,6 +916,7 @@
+     # Loại bỏ trùng lặp
+     texts = list(set(all_texts))
+     new_ones = [t for t in texts if t not in known_texts]
+
++    logger.info(f"[CHAT] Checking for supplier replies, known texts: {len(known_texts)}")
++
+     # Nếu có tin nhắn mới hoặc supplier reply xác nhận qua div.nick
+     if new_ones or supplier_replied:
+         known_texts.update(new_ones)
+         await _shot(page, 'reply_detected')
++        logger.info(f"[CHAT] Supplier reply detected: {len(new_ones)} new messages")
+         return {'new_messages': new_ones[:5], 'supplier_replied': supplier_replied}
+
+     now = asyncio.get_event_loop().time()
+@@ -947,6 +1041,7 @@
+         page = await context.new_page()
+-        page.on("console", lambda msg: print(f"[BROWSER:{msg.type()}] {msg.text}"))
++        page.on("console", lambda msg: (
++            None if any(k in msg.text() for k in NOISY) else print(f"[BROWSER:{msg.type()}] {msg.text()}")
++        ))
+
+         return pw, browser, context, page
+     except Exception:

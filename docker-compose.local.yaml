@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+      - "5901:5901"  # VNC raw
+      - "6901:6901"  # noVNC web
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Auto-advance gates để không cần chờ manual confirmation
+      - AUTO_ADVANCE_GATES=1
+      - AUTO_ADVANCE_TIMEOUT=1.0
+      # Nếu MẠNG có proxy, bỏ comment 3 dòng dưới và chỉnh thông số:
+      # - HTTP_PROXY=http://user:pass@proxy:port
+      # - HTTPS_PROXY=http://user:pass@proxy:port
+      # - NO_PROXY=localhost,127.0.0.1,*.local,*.docker.internal
+    # ⭐ Thêm DNS công khai để container phân giải domain 1688/Taobao ổn định
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    healthcheck:
+      # Nếu image không có curl, đổi sang: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      - frontend  # không bắt buộc, chỉ để đảm bảo startup thứ tự khi bạn chạy cả cụm
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    # Mount code để dev, nhưng GIỮ node_modules bên trong container
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: ["npm","run","dev","--","--host","0.0.0.0","--port","5173"]
+    # ⭐ Thêm DNS tương tự (đề phòng frontend cũng cần gọi API tới domain ngoài)
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped

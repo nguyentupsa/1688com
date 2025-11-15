@@ -1,0 +1,81 @@
+services:
+  backend:
+    build: ./backend
+    container_name: backend
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - DOCKER_CONTAINER=true
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DISPLAY=:99
+      - AUTO_ADVANCE_GATES=1
+      - AUTO_ADVANCE_TIMEOUT=1.0
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/.env:/app/.env:ro
+    # 👉 chỉ "expose" nội bộ cho các container khác (Caddy), KHÔNG publish ra ngoài
+    expose:
+      - "8000"
+      - "6901"
+      - "5901"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    shm_size: "1gb"
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+
+  frontend:
+    ports:
+      - "5173:5173"
+    command: ["npm","run","dev","--","--host","0.0.0.0","--port","5173"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    # Dev server Vite (5173) chạy nội bộ; Caddy sẽ reverse_proxy vào
+    expose:
+      - "5173"
+    environment:
+      # 👇 dùng đường dẫn tương đối để FE gọi qua Caddy
+      - VITE_API_URL=/api
+      - VITE_WS_URL=/ws
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# docker-compose.yml (service caddy)
+
+  caddy:
+    image: caddy:2.7
+    ports:
+      - "80:80"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend
+
+
+volumes:
+  caddy_data:
+  caddy_config:
