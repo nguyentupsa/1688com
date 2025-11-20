@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
+import httpx
 
 from models import (
     NegotiationRequest, NegotiationStartResponse, SystemStatus,
@@ -180,6 +181,46 @@ logging.getLogger().addHandler(ws_handler)
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.get("/api/check-proxy")
+async def check_proxy(url: str = Query(..., description="Target URL to test via proxy")):
+    """Check proxy connectivity by making a request through the configured proxy."""
+    if not settings.PROXY_URL:
+        return {
+            "status": "error",
+            "url": url,
+            "error": "Proxy not configured"
+        }
+
+    try:
+        async with httpx.AsyncClient(proxies=settings.PROXY_URL, timeout=10.0) as client:
+            resp = await client.get(url)
+
+        # Try to parse JSON, but fall back to text if not JSON
+        try:
+            body = resp.json()
+        except ValueError:
+            body = resp.text
+
+        return {
+            "status": "ok",
+            "url": url,
+            "proxy": settings.PROXY_URL,
+            "http_status": resp.status_code,
+            "response": body,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "url": url,
+            "proxy": settings.PROXY_URL,
+            "error": str(e),
+        }
+
+@app.get("/check-proxy")
+async def check_proxy_legacy(url: str = Query(..., description="Target URL to test via proxy")):
+    """Legacy proxy endpoint - redirects to /api/check-proxy."""
+    return await check_proxy(url)
 
 @app.get("/api/status")
 async def get_status() -> SystemStatus:

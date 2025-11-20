@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # Playwright
     browser_headless: bool = False
+    browser_force_headless: bool = False
     browser_slowmo: int = 100
     user_data_dir: str = "./data/user_data_dir"
 
@@ -34,6 +35,31 @@ class Settings(BaseSettings):
 
     # Expected post-login URL
     work_1688_url_pattern: str = "https://work.1688.com/home/"
+
+    # Proxy Configuration
+    PROXY_ENABLED: bool = False
+    PROXY_HOST: Optional[str] = None
+    PROXY_PORT: Optional[int] = None
+    PROXY_USERNAME: Optional[str] = None
+    PROXY_PASSWORD: Optional[str] = None
+
+    @property
+    def PROXY_URL(self) -> Optional[str]:
+        """Construct proxy URL from proxy settings."""
+        # If PROXY_ENABLED is False → PROXY_URL = None
+        if not self.PROXY_ENABLED:
+            return None
+
+        # If PROXY_HOST or PROXY_PORT is missing → PROXY_URL = None
+        if not self.PROXY_HOST or not self.PROXY_PORT:
+            return None
+
+        # If PROXY_USERNAME and PROXY_PASSWORD are present → authenticated proxy
+        if self.PROXY_USERNAME and self.PROXY_PASSWORD:
+            return f"http://{self.PROXY_USERNAME}:{self.PROXY_PASSWORD}@{self.PROXY_HOST}:{self.PROXY_PORT}"
+
+        # Else (no auth) → simple proxy
+        return f"http://{self.PROXY_HOST}:{self.PROXY_PORT}"
 
     class Config:
         env_file = ".env"

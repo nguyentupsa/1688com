@@ -6,7 +6,9 @@ services:
     ports:
       - "5901:5901"  # VNC raw
       - "6901:6901"  # noVNC web
-    env_file: .env
+    env_file:
+      - .env
+      - ./backend/.env
     environment:
       - PYTHONUNBUFFERED=1
       - AUTO_ADVANCE_GATES=1

@@ -53,6 +53,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     payment_terms: ''
   })
 
+  
   // Fetch AI status on component mount
   React.useEffect(() => {
     const fetchAIStatus = async () => {
@@ -100,10 +101,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     onStopNegotiation()
   }
 
-  const loadDemoUrl = () => {
-    setProductUrl('https://detail.1688.com/offer/8213687943598.html')
-  }
-
+  
   const generateAiOpener = useCallback(async () => {
     if (!productUrl.trim()) {
       alert('Please enter a product URL first')
@@ -150,6 +148,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
   const urlError = validateUrl(productUrl)
 
+  
   return (
     <div className="space-y-6">
       {/* Product Configuration */}
@@ -165,29 +164,20 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <label className="block text-sm font-medium text-gray-700 mb-2">
               1688 Product URL
             </label>
-            <div className="flex space-x-2">
-              <input
-                type="url"
-                value={productUrl}
-                onChange={(e) => setProductUrl(e.target.value)}
-                placeholder="https://detail.1688.com/offer/xxxxxxxx.html"
-                className={`flex-1 input ${urlError ? 'input-error' : ''}`}
-                disabled={isRunning}
-              />
-              <button
-                onClick={loadDemoUrl}
-                disabled={isRunning}
-                className="btn btn-outline"
-                type="button"
-              >
-                Demo
-              </button>
-            </div>
+            <input
+              type="url"
+              value={productUrl}
+              onChange={(e) => setProductUrl(e.target.value)}
+              placeholder="https://detail.1688.com/offer/xxxxxxxx.html"
+              className={`w-full input ${urlError ? 'input-error' : ''}`}
+              disabled={isRunning}
+            />
             {urlError && (
               <p className="text-xs text-error-600 mt-1">{urlError}</p>
             )}
           </div>
 
+  
           {/* Opening Message */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">

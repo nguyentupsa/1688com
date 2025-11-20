@@ -210,43 +210,74 @@ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: s
             _state["_page"] = page
             _save_session_snapshot()
 
-        # 2) Ensure login và tự động điều hướng đến sản phẩm
+        # 2) Ensure login with new flow: login page first, then product
         offer_url = playwright_driver.normalize_1688_product_url(product_url)
-        logger.info(f"[STATE] Starting login process for product: {offer_url}")
+        logger.info(f"[STATE] Starting refined login process for product: {offer_url}")
 
         res = await playwright_driver.ensure_login_via_taobao(
             page,
-            timeout_s=300,
-            next_url=offer_url,       # ✅ chuyển ngay đến sản phẩm
-            force_show_login=False    # ✅ cho phép tự động redirect
+            product_url=offer_url,
+            timeout_login=120_000  # 120 seconds for login
         )
         logger.info(f"[STATE] Login result: {res}")
 
-        # Accept both bool and dict for compatibility
-        if isinstance(res, bool):
-            ok = res
-            reason = None
-        else:
-            ok = bool(res.get("ok"))
-            reason = res.get("reason")
+        # Handle structured response from new login flow
+        ok = bool(res.get("ok"))
+        reason = res.get("reason")
+        error_type = res.get("type")
 
         if not ok:
-            error_msg = f"Login failed{': '+reason if reason else ''}"
-            logger.error(f"[STATE] Login failed: {reason if reason else 'Unknown reason'}")
-            # Emit log via WebSocket
-            try:
-                from app import manager
-                import json
-                await manager.broadcast(json.dumps({
-                    "message": "⚠️ Login chưa ổn định. Vui lòng hoàn tất đăng nhập rồi bấm Retry.",
-                    "phase": "blocked",
-                    "need_user_action": True
-                }))
-            except Exception:
-                pass
-            raise RuntimeError(f"Login not settled: {reason if reason else 'Unknown reason'}")
+            # Handle specific error types with clear user messages
+            if error_type == "login_timeout":
+                error_msg = f"Login timeout: {reason if reason else 'User did not complete login in time'}"
+                logger.error(f"[STATE] Login timeout: {reason if reason else 'User did not complete login in time'}")
+                # Emit specific timeout error message via WebSocket
+                try:
+                    from app import manager
+                    import json
+                    await manager.broadcast(json.dumps({
+                        "message": "⏰ User did not complete login in time. Please log in in the browser window and press Retry.",
+                        "phase": "blocked",
+                        "need_user_action": True,
+                        "error_type": "login_timeout"
+                    }))
+                except Exception:
+                    pass
+                raise RuntimeError(f"Login not settled: {reason if reason else 'User did not complete login in time'}")
+            elif error_type == "proxy_tunnel_failed":
+                error_msg = f"Proxy tunnel failed: {reason if reason else 'Unable to reach product URL through proxy'}"
+                logger.error(f"[STATE] Proxy tunnel failed: {reason if reason else 'Unknown reason'}")
+                # Emit specific error message via WebSocket
+                try:
+                    from app import manager
+                    import json
+                    await manager.broadcast(json.dumps({
+                        "message": "🚫 Proxy line cannot open the product page (detail.1688.com). Please change to another proxy or try again later.",
+                        "phase": "blocked",
+                        "need_user_action": True,
+                        "error_type": "proxy_tunnel_failed"
+                    }))
+                except Exception:
+                    pass
+                raise RuntimeError(f"Login not settled: proxy tunnel failed - {reason if reason else 'Please change proxy line or disable proxy'}")
+            else:
+                error_msg = f"Login failed{': '+reason if reason else ''}"
+                logger.error(f"[STATE] Login failed: {reason if reason else 'Unknown reason'}")
+                # Emit generic login error via WebSocket
+                try:
+                    from app import manager
+                    import json
+                    await manager.broadcast(json.dumps({
+                        "message": "⚠️ Login process failed. Please complete login in the browser window and press Retry.",
+                        "phase": "blocked",
+                        "need_user_action": True,
+                        "error_type": "login_failed"
+                    }))
+                except Exception:
+                    pass
+                raise RuntimeError(f"Login not settled: {reason if reason else 'Unknown reason'}")
 
-        logger.info(f"[STATE] Login completed for product: {offer_url}")
+        logger.info(f"[STATE] Refined login flow completed successfully for product: {offer_url}")
 
         # Gate sau khi login xong
         _state["step"] = "S0_DONE"
@@ -286,23 +317,80 @@ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: s
             except:
                 pass
 
-            # >>> CLICK 客服 MỞ CHAT <<<
-            from playwright_driver import click_kefu_open_chat
-            logger.info("[STATE] Clicking 客服 to open chat...")
-            chat_page = await click_kefu_open_chat(page, timeout_ms=12000)
-            logger.info("[STATE] Chat opened at: %s", chat_page.url)
+            # >>> ENSURE PRODUCT PAGE AND CHAT ARE READY <<<
+            from playwright_driver import ensure_product_and_chat_open, dismiss_offer_overlays
+            logger.info("[STATE] Ensuring product page and chat are ready...")
 
-            # Additional overlay dismiss as safety measure
-            from playwright_driver import dismiss_offer_overlays
-            await dismiss_offer_overlays(chat_page)
+            chat_status = await ensure_product_and_chat_open(
+                page,
+                offer_url,
+                logger=logger
+            )
 
-            # Debug log
-            logger.info("[STATE] found kefu: %s", await page.locator("od-text[i18n='wangwang']").count())
+            if chat_status.get("ok"):
+                # chat_ready -> proceed as before
+                logger.info("[STATE] Chat is ready, continuing negotiation flow")
+                logger.info("[STATE] found kefu: %d", chat_status.get("kefu_count", 0))
+                chat_page = chat_status.get("page", page)
 
-            # Gate sau khi vào sản phẩm và mở chat
-            _state["step"] = "S1_DONE"; _save_session_snapshot()
-            reset_gate("CONFIRM_PRODUCT_AND_CHAT")
-            await _wait_gate("CONFIRM_PRODUCT_AND_CHAT", timeout=90)
+                # Additional overlay dismiss as safety measure
+                await dismiss_offer_overlays(chat_page)
+
+                # Gate sau khi vào sản phẩm và mở chat
+                _state["step"] = "S1_DONE"; _save_session_snapshot()
+                reset_gate("CONFIRM_PRODUCT_AND_CHAT")
+                await _wait_gate("CONFIRM_PRODUCT_AND_CHAT", timeout=90)
+            else:
+                status_type = chat_status.get("type")
+                if status_type == "captcha_block":
+                    # We hit a captcha or unusual-traffic page.
+                    logger.error("[STATE] Captcha / unusual-traffic block detected at %s", chat_status.get("url"))
+                    # Emit WebSocket message
+                    try:
+                        from app import manager
+                        import json
+                        await manager.broadcast(json.dumps({
+                            "message": "⚠️ 1688 is showing a captcha / unusual-traffic screen. Please solve it in the browser window, then click Retry.",
+                            "phase": "blocked",
+                            "need_user_action": True,
+                            "error_type": "captcha_block"
+                        }))
+                    except Exception:
+                        pass
+                    # stay in the current state and do NOT auto-advance
+                    return
+                elif status_type == "chat_not_found":
+                    logger.error("[STATE] Chat entry not found on product page: %s", chat_status.get("url"))
+                    # Emit WebSocket message
+                    try:
+                        from app import manager
+                        import json
+                        await manager.broadcast(json.dumps({
+                            "message": "⚠️ Cannot find the chat entry (kefu) on this product page. Please open the chat manually in the browser, then click Retry.",
+                            "phase": "blocked",
+                            "need_user_action": True,
+                            "error_type": "chat_not_found"
+                        }))
+                    except Exception:
+                        pass
+                    # also stay in current state
+                    return
+                else:
+                    # fallback: treat as error
+                    logger.error("[STATE] Unexpected chat_status: %r", chat_status)
+                    # Emit WebSocket message
+                    try:
+                        from app import manager
+                        import json
+                        await manager.broadcast(json.dumps({
+                            "message": "❌ Failed to open chat for this product. Please check the browser window.",
+                            "phase": "error",
+                            "need_user_action": True,
+                            "error_type": "chat_error"
+                        }))
+                    except Exception:
+                        pass
+                    return
 
             # Đợi ô chat sẵn sàng (đã hỗ trợ <pre.edit contenteditable="true">)
             await playwright_driver.wait_for_chat_ready(chat_page, timeout_s=25)
@@ -463,12 +551,22 @@ async def start_login_only():
         # Ensure login and navigate to Work Home
         _state["step"] = "ENSURE_LOGIN_TO_WORK_HOME"
         _save_session_snapshot()
-        await playwright_driver.ensure_login_via_taobao(
+        login_result = await playwright_driver.ensure_login_via_taobao(
             page,
-            timeout_s=300,
-            next_url="https://work.1688.com/?tracelog=login_target_is_blank_1688",
-            force_show_login=True
+            product_url="https://work.1688.com/?tracelog=login_target_is_blank_1688",
+            timeout_login=120_000  # 120 seconds for login
         )
+
+        # Handle login result for start_login_only
+        if not login_result.get("ok"):
+            error_type = login_result.get("type")
+            reason = login_result.get("reason")
+            if error_type == "login_timeout":
+                raise RuntimeError(f"Login timeout: {reason if reason else 'User did not complete login in time'}")
+            elif error_type == "proxy_tunnel_failed":
+                raise RuntimeError(f"Proxy tunnel failed: {reason if reason else 'Unable to reach work.1688.com through proxy'}")
+            else:
+                raise RuntimeError(f"Login failed: {reason if reason else 'Unknown reason'}")
 
         # Persist storage state
         await playwright_driver.persist_state(_state["_context"])
