@@ -71,51 +71,382 @@ def _is_punish_page(url: str, page_text: str = "") -> bool:
 
     return any(phrase in page_text for phrase in deny_phrases)
 
-# ========= LOGIN - ULTRA MINIMAL =========
+# ========= Robust Login Detection =========
+def is_on_login_or_verify_page(url: str) -> bool:
+    """Check if URL is a login or verification page (ALWAYS not logged in)"""
+    url_lower = url.lower()
+
+    login_verify_patterns = [
+        'login.taobao.com',
+        'login.1688.com',
+        'passport.taobao.com/iv/normal_validate',
+        'passport.taobao.com/iv/identity_verify',
+        'passport.taobao.com/iv/',
+    ]
+
+    return any(pattern in url_lower for pattern in login_verify_patterns)
+
+async def has_login_buttons_visible(page) -> bool:
+    """Check if login/register buttons are visible (indicates NOT logged in)"""
+    login_button_selectors = [
+        'text=/登录|请登录|免费注册/i',
+        'a[href*="login"]',
+        'button:has-text("登录")',
+        '.login-btn',
+        '.sign-in-btn'
+    ]
+
+    try:
+        for selector in login_button_selectors:
+            elements = await page.locator(selector).count()
+            if elements > 0:
+                first_visible = await page.locator(selector).first().is_visible()
+                if first_visible:
+                    return True
+    except Exception as e:
+        logger.debug(f"Error checking login buttons: {e}")
+
+    return False
+
+async def has_logged_in_indicators(page) -> bool:
+    """Check if page has logged-in user indicators"""
+    logged_in_selectors = [
+        'text=/退出登录|退出 登陆|退出/i',
+        'text=/您好|你好/i',
+        '.member-nickname',
+        '.member-name',
+        '.user-name',
+        '.user-info',
+        '.avatar',
+        'a[href*="logout"]',
+        'img[alt*="avatar"]',
+        '[data-role*="user"]',
+        '.user-profile'
+    ]
+
+    try:
+        for selector in logged_in_selectors:
+            elements = await page.locator(selector).count()
+            if elements > 0:
+                first_visible = await page.locator(selector).first().is_visible()
+                if first_visible:
+                    return True
+    except Exception as e:
+        logger.debug(f"Error checking logged-in indicators: {e}")
+
+    return False
+
+async def has_logged_in_cookies(page) -> bool:
+    """Check if logged-in cookies exist"""
+    logged_in_cookie_names = [
+        'tracknick',
+        'lgc',
+        '_tb_token_',
+        'cookie2',
+        'uc1',
+        'uc3',
+        'isg',
+        'l'
+    ]
+
+    domains = ['.1688.com', '.taobao.com', '.tmall.com']
+
+    try:
+        cookies = await page.context().cookies()
+        return any(
+            cookie['name'] in logged_in_cookie_names and
+            any(cookie['domain'].endswith(domain) for domain in domains)
+            for cookie in cookies
+        )
+    except Exception as e:
+        logger.debug(f"Error checking cookies: {e}")
+        return False
+
+def is_logged_in_url(url: str) -> bool:
+    """Check if URL indicates logged-in state"""
+    url_lower = url.lower()
+
+    logged_in_patterns = [
+        'www.1688.com',
+        'my.1688.com',
+        'work.1688.com',
+        'member.1688.com',
+        'cart.1688.com',
+        'order.1688.com',
+        'www.taobao.com',
+        'my.taobao.com',
+        'member1.taobao.com',
+        'trade.taobao.com',
+        'cart.taobao.com'
+    ]
+
+    # Must be on normal page (not login/verify) AND match logged-in patterns
+    return not is_on_login_or_verify_page(url_lower) and \
+           any(pattern in url_lower for pattern in logged_in_patterns)
+
 async def check_if_logged_in(page):
-    """Check login status - URL + DOM based detection (no cookies)."""
+    """
+    ENHANCED LOGIN DETECTOR - Optimized for 1688.com cookie-based detection
+
+    Rules:
+    1. ALWAYS false on login/verify pages
+    2. On www.1688.com: Check auth cookies first, then DOM indicators
+    3. Only treat as NOT logged in if login buttons visible AND no auth cookies
+    4. Enhanced DOM selectors for 1688.com
+
+    Args:
+        page: Playwright page instance
+
+    Returns:
+        bool: true if logged in, false otherwise
+    """
     try:
         current_url = page.url or ""
 
-        # Rule 1: If URL contains "login.taobao.com" → NOT logged in → return False
-        if "login.taobao.com" in current_url:
-            logger.info(f"[LOGIN] NOT logged in - on login page: {current_url}")
+        logger.debug(f"[LOGIN] Checking login status for URL: {current_url}")
+
+        # Rule 1: ALWAYS false on login/verify pages
+        if is_on_login_or_verify_page(current_url):
+            logger.info(f"[LOGIN] NOT logged in - on login/verify page: {current_url}")
             return False
 
-        # Rule 2: If URL contains any logged-in indicators → logged in → return True
-        logged_in_urls = ['www.1688.com', 'my.1688.com', 'work.1688.com', 'member.1688.com']
-        if any(indicator in current_url for indicator in logged_in_urls):
-            logger.info(f"[LOGIN] Logged in detected via URL: {current_url}")
+        # Parse URL for better analysis
+        from urllib.parse import urlparse
+        parsed_url = urlparse(current_url)
+        hostname = parsed_url.hostname or ""
+
+        # Enhanced detection for 1688.com main site
+        if hostname.endswith("1688.com") and not hostname.startswith("login."):
+            logger.info(f"[LOGIN] On 1688.com main site - prioritizing cookie detection")
+
+            # Rule 2a: Check auth cookies FIRST (most reliable on 1688.com)
+            auth_cookies = await has_1688_auth_cookies(page)
+            if auth_cookies:
+                logger.info(f"[LOGIN] 1688 auth cookies detected – marking as logged in: {current_url}")
+                return True
+
+            # Rule 2b: Only check for login buttons if no auth cookies found
+            login_buttons_visible = await has_1688_login_buttons_visible(page)
+            if login_buttons_visible:
+                logger.info(f"[LOGIN] Login/register buttons visible on 1688.com + no auth cookies - NOT logged in: {current_url}")
+                return False
+
+            # Rule 2c: Check DOM indicators for 1688.com (greetings, logout)
+            dom_indicators = await has_1688_dom_indicators(page)
+            if dom_indicators:
+                logger.info(f"[LOGIN] 1688 DOM indicators found - marking as logged in: {current_url}")
+                return True
+
+            # Rule 2d: If we're on 1688.com main site without login buttons, assume logged in
+            logger.info(f"[LOGIN] On 1688.com main site without login buttons - assuming logged in: {current_url}")
             return True
 
-        # Rule 3: Check DOM elements that ONLY appear after login
-        try:
-            login_indicators = [
-                '.member-nickname',
-                '.member-name',
-                '.user-name',
-                'a[href*="logout"]',
-                'img[alt*="avatar"]'
-            ]
+        # Rule 3: Check URL indicators for other sites (taobao.com, etc.)
+        if is_logged_in_url(current_url):
+            logger.info(f"[LOGIN] Likely logged in - URL indicates logged-in state: {current_url}")
 
-            for selector in login_indicators:
-                element = await page.query_selector(selector)
-                if element:
-                    # Check if element is visible for more reliability
-                    is_visible = await element.is_visible()
-                    if is_visible:
-                        logger.info(f"[LOGIN] Logged in detected via DOM element: {selector}")
-                        return True
-        except Exception as e:
-            logger.debug(f"[LOGIN] Error checking DOM elements: {e}")
+            # Check auth cookies for these sites too
+            if await has_logged_in_cookies(page):
+                logger.info(f"[LOGIN] Auth cookies confirm login status: {current_url}")
+                return True
 
-        # Rule 4: Otherwise → return False
+        # Rule 4: Check for login buttons (NOT logged in indicator)
+        if await has_login_buttons_visible(page):
+            logger.info(f"[LOGIN] Login/register buttons visible - NOT logged in: {current_url}")
+            return False
+
+        # Rule 5: Check for logged-in DOM indicators
+        if await has_logged_in_indicators(page):
+            logger.info(f"[LOGIN] Logged in - DOM indicators found: {current_url}")
+            return True
+
+        # Rule 6: Check for logged-in cookies (general fallback)
+        if await has_logged_in_cookies(page):
+            logger.info(f"[LOGIN] Logged in - cookies indicate logged-in state: {current_url}")
+            return True
+
+        # Default: not logged in
         logger.info(f"[LOGIN] NOT logged in - no indicators found: {current_url}")
         return False
 
     except Exception as e:
         logger.error(f"[LOGIN] Error checking login status: {e}")
         return False
+
+async def has_1688_auth_cookies(page) -> bool:
+    """Check for 1688-specific authentication cookies"""
+    try:
+        # Critical auth cookies for 1688.com
+        auth_cookie_names = [
+            "tracknick",     # Main user tracking cookie
+            "lgc",           # Login cookie
+            "_tb_token_",   # Taobao token
+            "cookie2",       # Session cookie
+            "uc1",           # User cookie 1
+            "uc3",           # User cookie 3
+            "isg",           # ISG cookie
+            "l"              # Legacy cookie
+        ]
+
+        domains = [".1688.com", ".taobao.com", ".tmall.com"]
+        cookies = await page.context().cookies()
+
+        for cookie in cookies:
+            if (cookie['name'] in auth_cookie_names and
+                any(cookie['domain'].endswith(domain) for domain in domains)):
+                logger.debug(f"[LOGIN] Found auth cookie: {cookie['name']} from domain {cookie['domain']}")
+                return True
+
+        return False
+
+    except Exception as e:
+        logger.debug(f"[LOGIN] Error checking 1688 auth cookies: {e}")
+        return False
+
+async def has_1688_login_buttons_visible(page) -> bool:
+    """Check for login/register buttons specifically on 1688.com"""
+    try:
+        # Common 1688 login button selectors
+        login_button_selectors = [
+            'text=/登录|请登录|免费注册/i',
+            'a[href*="login"]',
+            'a[href*="register"]',
+            'button:has-text("登录")',
+            'button:has-text("注册")',
+            '.login-btn',
+            '.register-btn',
+            '.sign-in-btn',
+            '[data-spm*="login"]'
+        ]
+
+        for selector in login_button_selectors:
+            try:
+                elements = await page.locator(selector).count()
+                if elements > 0:
+                    # Check if any are actually visible
+                    for i in range(min(elements, 3)):  # Check first 3 elements max
+                        if await page.locator(selector).nth(i).is_visible():
+                            logger.debug(f"[LOGIN] Found visible login button: {selector}")
+                            return True
+            except Exception:
+                continue
+
+        return False
+
+    except Exception as e:
+        logger.debug(f"[LOGIN] Error checking 1688 login buttons: {e}")
+        return False
+
+async def has_1688_dom_indicators(page) -> bool:
+    """Check for 1688-specific logged-in DOM indicators"""
+    try:
+        # Enhanced selectors for 1688.com user indicators
+        logged_in_selectors = [
+            # Greetings and user info (Chinese)
+            'text=/您好|你好|早上好|下午好|晚上好/i',
+
+            # Logout links and buttons
+            'text=/退出登录|退出 登陆|退出/i',
+            'a[href*="logout"]',
+
+            # User-specific elements
+            '.member-nickname',
+            '.member-name',
+            '.user-name',
+            '.user-info',
+            '.user-profile',
+
+            # Avatar and user images
+            '.avatar',
+            'img[alt*="avatar"]',
+            'img[alt*="用户"]',
+            '[class*="avatar"]',
+            '[class*="user"]',
+
+            # User-specific data attributes
+            '[data-role*="user"]',
+            '[data-spm*="user"]',
+
+            # 1688 specific elements
+            '.safeframe-user-info',
+            '.user-operate',
+            '.login-info'
+        ]
+
+        for selector in logged_in_selectors:
+            try:
+                elements = await page.locator(selector).count()
+                if elements > 0:
+                    # Check if any are actually visible
+                    for i in range(min(elements, 3)):  # Check first 3 elements max
+                        if await page.locator(selector).nth(i).is_visible():
+                            logger.debug(f"[LOGIN] Found visible logged-in indicator: {selector}")
+                            return True
+            except Exception:
+                continue
+
+        return False
+
+    except Exception as e:
+        logger.debug(f"[LOGIN] Error checking 1688 DOM indicators: {e}")
+        return False
+
+async def wait_until_logged_in(page, logger_func=None) -> dict:
+    """
+    Wait indefinitely until user is logged in
+    NO FIXED TIMEOUT - relies entirely on login detection
+
+    Args:
+        page: Playwright page instance
+        logger_func: Optional logger function
+
+    Returns:
+        dict: {"ok": bool, "type": str, "reason": str, "url": str}
+    """
+    if logger_func is None:
+        logger_func = logger.info
+
+    check_interval = 2  # 2 seconds
+
+    logger_func("[LOGIN] Starting indefinite wait for login completion...")
+
+    while True:
+        # Check if page is closed
+        if page.is_closed():
+            result = {
+                "ok": False,
+                "type": "page_closed",
+                "reason": "Page was closed while waiting for login"
+            }
+            logger_func("[LOGIN] Page closed while waiting for login")
+            return result
+
+        try:
+            current_url = page.url
+            logged_in = await check_if_logged_in(page)
+
+            if logged_in:
+                result = {
+                    "ok": True,
+                    "type": "logged_in",
+                    "url": current_url,
+                    "reason": "Successfully logged in"
+                }
+                logger_func(f"[LOGIN] Login detected! URL: {current_url}")
+                return result
+
+            # Log current state
+            if is_on_login_or_verify_page(current_url):
+                logger_func(f"[LOGIN] Still on login/verify page: {current_url}")
+            else:
+                logger_func(f"[LOGIN] On non-login page but not logged in yet: {current_url}")
+
+        except Exception as e:
+            logger_func(f"[LOGIN] Error during login check: {e}")
+            # Continue waiting even if there's an error
+
+        # Wait before next check
+        await asyncio.sleep(check_interval)
 
 async def login(page):
     """
@@ -516,7 +847,14 @@ async def is_logged_in(page) -> bool:
 # ========= Captcha / Traffic Block Detection =========
 async def is_captcha_or_traffic_block(page: Page) -> bool:
     """
-    Detect if the current page is a captcha/unusual traffic block page.
+    Enhanced detection for Alibaba captcha/unusual traffic block pages.
+
+    Detects:
+    - Captcha Interception pages
+    - Anti-robot verification pages
+    - Baxia-punish captcha container (primary detection)
+    - Unusual traffic detection
+    - QR code verification pages
 
     Args:
         page: Playwright page instance
@@ -529,6 +867,37 @@ async def is_captcha_or_traffic_block(page: Page) -> bool:
         title = ""
         body_text = ""
 
+        # PRIMARY: Check for baxia-punish captcha container (most reliable)
+        try:
+            captcha_selector = '#baxia-punish > div.wrapper > div > div.bannar > div.captcha-tips > div:nth-child(1)'
+            captcha_element = page.locator(captcha_selector)
+            if await captcha_element.count() > 0:
+                # Check if it's actually visible or exists in DOM
+                try:
+                    if await captcha_element.is_visible(timeout=1000):
+                        captcha_text = await captcha_element.inner_text()
+                        logger.warning(f"[CAPTCHA] Detected baxia-punish captcha container: {captcha_text[:100]}...")
+                        return True
+                except Exception:
+                    # Element exists in DOM even if not fully visible
+                    logger.warning("[CAPTCHA] Detected baxia-punish captcha container in DOM")
+                    return True
+        except Exception:
+            pass
+
+        # Check URL patterns (secondary)
+        if "anti_robot" in url:
+            logger.warning(f"[CAPTCHA] Detected anti_robot URL: {url}")
+            return True
+
+        if "captcha" in url.lower():
+            logger.warning(f"[CAPTCHA] Detected captcha URL: {url}")
+            return True
+
+        if "verify" in url.lower() and "1688.com" in url:
+            logger.warning(f"[CAPTCHA] Detected 1688 verification URL: {url}")
+            return True
+
         try:
             title = await page.title()
         except Exception:
@@ -539,13 +908,21 @@ async def is_captcha_or_traffic_block(page: Page) -> bool:
         except Exception:
             pass
 
-        # Heuristics for Alibaba captcha / unusual traffic pages
+        # Enhanced heuristics for Alibaba captcha / unusual traffic pages (fallback)
         if "Captcha Interception" in title:
             logger.warning(f"[CAPTCHA] Detected by title: {title}")
             return True
 
         if "unusual traffic from your network" in body_text.lower():
             logger.warning("[CAPTCHA] Detected by body text: unusual traffic from your network")
+            return True
+
+        if "detected unusual traffic from your network" in body_text.lower():
+            logger.warning("[CAPTCHA] Detected by body text: detected unusual traffic from your network")
+            return True
+
+        if "sorry, we have detected unusual traffic" in body_text.lower():
+            logger.warning("[CAPTCHA] Detected by body text: sorry, we have detected unusual traffic")
             return True
 
         if "please slide to verify" in body_text.lower():
@@ -556,13 +933,17 @@ async def is_captcha_or_traffic_block(page: Page) -> bool:
             logger.warning("[CAPTCHA] Detected by Chinese text: 访问异常/异常流量")
             return True
 
+        if "验证" in body_text and "robot" in body_text.lower():
+            logger.warning("[CAPTCHA] Detected by Chinese text: 验证/robot")
+            return True
+
         if "人机验证" in body_text or "滑块验证" in body_text:
             logger.warning("[CAPTCHA] Detected by Chinese text: 人机验证/滑块验证")
             return True
 
-        # URL-based detection
-        if "captcha" in url.lower() or "verify" in url.lower():
-            logger.warning(f"[CAPTCHA] Detected by URL: {url}")
+        # URL-based detection (redundant check since we already checked above)
+        if "captcha" in url.lower() and "1688.com" in url:
+            logger.warning(f"[CAPTCHA] Detected 1688 captcha URL: {url}")
             return True
 
         return False
@@ -570,6 +951,150 @@ async def is_captcha_or_traffic_block(page: Page) -> bool:
     except Exception as e:
         logger.error(f"[CAPTCHA] Error detecting captcha page: {e}")
         return False
+
+# ========= Safe Kefu Detection Functions =========
+async def find_kefu_on_product_page(page: Page, logger=None) -> dict:
+    """
+    Safely find kefu/chat elements on a product page.
+    Returns structured result instead of None to prevent attribute errors.
+
+    Args:
+        page: Playwright page instance
+        logger: Logger instance (optional)
+
+    Returns:
+        dict: {
+            "found": bool,
+            "selector": str | None,
+            "count": int,
+            "first_visible": bool,
+            "elements": list
+        }
+    """
+    if logger is None:
+        logger = logger  # Use module logger if none provided
+
+    try:
+        logger.info("[KEFU] Searching for kefu/chat elements on product page")
+
+        # Common kefu/chat button selectors on 1688 product pages
+        kefu_selectors = [
+            'od-text[i18n="wangwang"]',  # Primary selector for kefu button
+            'div._buttonWrap_1p2az_60 img[src*="O1CN01ZaHib31lWomw16ded"]',  # Backup
+            'text=联系供应商', 'text=客服', 'text=咨询',
+            'button:has-text("联系")', '[data-title*="客服"]',
+            '.contact-supplier', '.customer-service', '.im-chat', '.im-btn',
+            '[class*="kefu"]', '[class*="wangwang"]', '[class*="chat"]'
+        ]
+
+        result = {
+            "found": False,
+            "selector": None,
+            "count": 0,
+            "first_visible": False,
+            "elements": []
+        }
+
+        # Search for kefu elements
+        for selector in kefu_selectors:
+            try:
+                elements = page.locator(selector)
+                count = await elements.count()
+
+                if count > 0:
+                    # Check if any are visible
+                    visible_count = 0
+                    for i in range(min(count, 3)):  # Check first 3 elements max
+                        try:
+                            if await elements.nth(i).is_visible(timeout=1000):
+                                visible_count += 1
+                                if not result["first_visible"]:
+                                    result["first_visible"] = True
+                        except Exception:
+                            continue
+
+                    if visible_count > 0:
+                        result["found"] = True
+                        result["selector"] = selector
+                        result["count"] = visible_count
+                        result["elements"] = [{"selector": selector, "index": i} for i in range(visible_count)]
+                        logger.info(f"[KEFU] Found {visible_count} kefu elements with selector: {selector}")
+                        break
+
+            except Exception as e:
+                logger.debug(f"[KEFU] Error checking selector {selector}: {e}")
+                continue
+
+        if not result["found"]:
+            logger.warning("[KEFU] No kefu/chat elements found on product page")
+
+        return result
+
+    except Exception as e:
+        error_msg = f"Error searching for kefu elements: {str(e)}"
+        logger.error(f"[KEFU] {error_msg}")
+        return {
+            "found": False,
+            "selector": None,
+            "count": 0,
+            "first_visible": False,
+            "elements": [],
+            "error": error_msg
+        }
+
+async def click_kefu_safely(page: Page, kefu_info: dict, logger=None) -> dict:
+    """
+    Safely click kefu button using structured kefu information.
+    Prevents NoneType errors by validating input first.
+
+    Args:
+        page: Playwright page instance
+        kefu_info: Result from find_kefu_on_product_page
+        logger: Logger instance (optional)
+
+    Returns:
+        dict: {"success": bool, "reason": str, "selector": str | None}
+    """
+    if logger is None:
+        logger = logger  # Use module logger if none provided
+
+    # Validate kefu_info
+    if not kefu_info or not kefu_info.get("found") or not kefu_info.get("selector"):
+        return {
+            "success": False,
+            "reason": "No valid kefu element found to click",
+            "selector": None
+        }
+
+    try:
+        selector = kefu_info["selector"]
+        logger.info(f"[KEFU] Attempting to click kefu element: {selector}")
+
+        kefu_btn = page.locator(selector).first
+        if await kefu_btn.is_visible(timeout=3000):
+            await kefu_btn.click()
+            logger.info(f"[KEFU] Successfully clicked kefu button: {selector}")
+            return {
+                "success": True,
+                "reason": "Kefu button clicked successfully",
+                "selector": selector
+            }
+        else:
+            logger.warning(f"[KEFU] Kefu button found but not visible: {selector}")
+            return {
+                "success": False,
+                "reason": "Kefu button found but not visible",
+                "selector": selector
+            }
+
+    except Exception as e:
+        error_msg = f"Error clicking kefu button: {str(e)}"
+        logger.error(f"[KEFU] {error_msg}")
+        return {
+            "success": False,
+            "reason": error_msg,
+            "selector": kefu_info.get("selector")
+        }
 
 # ========= Fallback Helper Functions =========
 async def reopen_page_without_proxy_and_reuse_cookies(page, next_url: str) -> dict:
@@ -703,29 +1228,23 @@ async def ensure_login_via_taobao(page, product_url: str, *, timeout_login: int 
         if await is_logged_in(page):
             logger.info("[LOGIN] User is already logged in - proceeding to product")
         else:
-            logger.info("[LOGIN] User not logged in, waiting for manual login")
+            logger.info("[LOGIN] User not logged in, waiting for manual login indefinitely")
             logger.info("[LOGIN] Please complete login in the VNC browser window")
 
-            # Step 3: Wait for login completion with polling
-            start_time = time.monotonic()
-            timeout_seconds = timeout_login / 1000
-            check_interval = 2  # Check every 2 seconds
+            # Step 3: Wait for login completion INDEFINITELY (no timeout)
+            login_result = await wait_until_logged_in(page, logger_func=logger.info)
 
-            while time.monotonic() - start_time < timeout_seconds:
-                if await is_logged_in(page):
-                    elapsed = time.monotonic() - start_time
-                    logger.info("[LOGIN] Login detected and settled after %.1f seconds", elapsed)
-                    break
-
-                await asyncio.sleep(check_interval)
-            else:
-                # Timeout reached
-                logger.error("[LOGIN] Login timeout after %d seconds", timeout_seconds)
+            if not login_result["ok"]:
+                # Handle page closed or other errors
+                logger.error(f"[LOGIN] Login waiting failed: {login_result['reason']}")
                 return {
                     "ok": False,
-                    "type": "login_timeout",
-                    "reason": f"User did not complete login in {timeout_seconds} seconds"
+                    "type": login_result["type"],
+                    "reason": login_result["reason"],
+                    "page": None
                 }
+
+            logger.info(f"[LOGIN] Login completed successfully at: {login_result['url']}")
 
         # Step 4: Login is settled, NOW navigate to product URL (after login confirmed)
         logger.info("[LOGIN] Step 4: Login settled, navigating to product_url: %s", product_url)
@@ -919,46 +1438,125 @@ async def wait_for_supplier_reply_canonical(page, timeout_s: int = 180):
 
 async def wait_for_chat_ready(page, timeout_s: int = 25):
     """
-    Wait for chat interface to be ready - minimal implementation.
-    This is a placeholder that should be enhanced with proper detection.
+    Wait for chat interface to be ready with robust iframe and DOM detection.
+
+    Args:
+        page: Playwright page instance
+        timeout_s: Maximum time to wait for chat to load (default: 25s)
+
+    Returns:
+        bool: True if chat interface is detected, False if timeout reached
+
+    Raises:
+        RuntimeError: If chat interface does not load within timeout
     """
     try:
-        logger.info(f"[CHAT] Waiting for chat ready (timeout: {timeout_s}s)")
+        logger.info(f"[CHAT] Waiting for chat UI to load (timeout: {timeout_s}s)")
 
-        # Try to find chat input elements
-        chat_input_selectors = [
+        # Wait for network idle before scanning for chat elements
+        logger.info("[CHAT] Waiting for page network idle...")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+            logger.info("[CHAT] Page network idle achieved")
+        except Exception as e:
+            logger.warning(f"[CHAT] Network idle timeout, proceeding anyway: {e}")
+
+        # Comprehensive chat UI selectors including iframes
+        chat_selectors = [
+            # Chat iframes (primary 1688 chat patterns)
+            'iframe[src*="ww"]', 'iframe[src*="im"]', 'iframe[src*="chat"]',
+            'iframe[src*="wangwang"]', 'iframe[src*="message"]',
+            'iframe[src*="alibaba"]',
+
+            # Chat containers and divs
+            'div[id*="chat"]', 'div[class*="chat"]', 'div[id*="im"]', 'div[class*="im"]',
+            'div[id*="wangwang"]', 'div[class*="wangwang"]',
+
+            # Chat input elements (fallback)
             'textarea', '[contenteditable="true"]', 'div[role="textbox"]',
-            'input[type="text"]', '.chat-input', '.message-input'
+            'input[type="text"]', '.chat-input', '.message-input', '.im-textarea',
+            '.msg-editor textarea', '[data-slate-editor="true"]'
         ]
 
         max_wait_time = min(timeout_s, 30)
-        check_interval = 1
+        check_interval = 0.5  # Check every 500ms as requested
         elapsed = 0
+        chat_detected = False
+        detected_selector = None
 
-        while elapsed < max_wait_time:
-            for selector in chat_input_selectors:
+        logger.info("[CHAT] Starting chat UI detection loop...")
+
+        while elapsed < max_wait_time and not chat_detected:
+            # Check all selectors
+            for selector in chat_selectors:
                 try:
-                    chat_input = page.locator(selector).first
-                    if await chat_input.is_visible(timeout=1000):
-                        logger.info(f"[CHAT] Chat ready with input: {selector}")
-                        return True
+                    elements = page.locator(selector)
+                    count = await elements.count()
+
+                    if count > 0:
+                        # For iframes, check visibility and src
+                        if selector.startswith('iframe'):
+                            for i in range(min(count, 3)):  # Check first 3 iframes max
+                                try:
+                                    iframe = elements.nth(i)
+                                    if await iframe.is_visible(timeout=500):
+                                        src = await iframe.get_attribute('src')
+                                        if src and any(k in src.lower() for k in ['ww', 'im', 'chat', 'wangwang', 'message']):
+                                            chat_detected = True
+                                            detected_selector = f"{selector} (src: {src[:50]}...)"
+                                            break
+                                except Exception:
+                                    continue
+                        else:
+                            # For non-iframe elements, check visibility
+                            for i in range(min(count, 3)):  # Check first 3 elements max
+                                try:
+                                    element = elements.nth(i)
+                                    if await element.is_visible(timeout=500):
+                                        chat_detected = True
+                                        detected_selector = selector
+                                        break
+                                except Exception:
+                                    continue
+
+                    if chat_detected:
+                        break
+
                 except Exception:
                     continue
 
+            if chat_detected:
+                break
+
+            # Wait before next check
             await asyncio.sleep(check_interval)
             elapsed += check_interval
 
-        logger.warning(f"[CHAT] Chat input not found after {elapsed} seconds, but continuing")
-        return True
+            # Log progress every 5 seconds
+            if int(elapsed) % 5 == 0 and elapsed > 0:
+                logger.info(f"[CHAT] Still waiting for chat UI... ({int(elapsed)}s/{max_wait_time}s)")
 
+        # Final result
+        if chat_detected:
+            logger.info(f"[CHAT] Chat interface detected! Selector: {detected_selector}")
+            return True
+        else:
+            error_msg = f"Chat interface did not load after {max_wait_time}s timeout"
+            logger.error(f"[CHAT] {error_msg}")
+            raise RuntimeError(error_msg)
+
+    except RuntimeError:
+        # Re-raise our timeout error
+        raise
     except Exception as e:
-        logger.error(f"[CHAT] Error waiting for chat ready: {e}")
-        return True
+        error_msg = f"Error while waiting for chat UI: {str(e)}"
+        logger.error(f"[CHAT] {error_msg}")
+        raise RuntimeError(error_msg)
 
 async def click_kefu_open_chat(page: Page, timeout_ms: int = 12000, logger=None) -> Page:
     """
-    From a 1688 product page, click the Kefu/chat button to open the chat window.
-    Return the chat page object.
+    From a 1688 product page, click the Kefu/chat button and wait for chat to load.
+    Integrates with the robust wait_for_chat_ready mechanism.
 
     Args:
         page: Current Playwright page on the product page
@@ -967,6 +1565,9 @@ async def click_kefu_open_chat(page: Page, timeout_ms: int = 12000, logger=None)
 
     Returns:
         Page: The page object (could be same page or new chat page)
+
+    Raises:
+        RuntimeError: If chat interface fails to load after clicking kefu
     """
     try:
         if logger:
@@ -984,6 +1585,7 @@ async def click_kefu_open_chat(page: Page, timeout_ms: int = 12000, logger=None)
 
         # Try to find and click the kefu button
         kefu_clicked = False
+        clicked_selector = None
         for selector in kefu_selectors:
             try:
                 kefu_btn = page.locator(selector).first
@@ -992,64 +1594,75 @@ async def click_kefu_open_chat(page: Page, timeout_ms: int = 12000, logger=None)
                     if logger:
                         logger.info(f"[KEFU] Clicked kefu button: {selector}")
                     kefu_clicked = True
+                    clicked_selector = selector
                     break
             except Exception:
                 continue
 
         if not kefu_clicked:
+            error_msg = "Could not find clickable kefu button on product page"
             if logger:
-                logger.warning("[KEFU] Could not find kefu button, but continuing")
+                logger.error(f"[KEFU] {error_msg}")
+            raise RuntimeError(error_msg)
 
-        # Wait a moment for any popup or navigation
-        await asyncio.sleep(2)
+        # Wait for page to stabilize after click before waiting for chat
+        if logger:
+            logger.info("[KEFU] Kefu button clicked, waiting for chat window to load...")
+
+        # Small delay to let the click action trigger any animations/popup
+        await page.wait_for_timeout(1000)
 
         # Check if a new page/chat window opened
         try:
-            # Wait for potential new page context
+            # Wait for potential new page context (handles popup windows)
             await page.wait_for_timeout(1000)
 
-            # If we're still on the same page, try to find chat interface
+            # If we're still on the same page, wait for chat interface to load
             current_url = page.url
             if logger:
                 logger.info(f"[KEFU] Current page URL after click: {current_url}")
 
-            # Look for chat interface on current page
-            chat_selectors = [
-                'textarea', '[contenteditable="true"]', 'div[role="textbox"]',
-                '.chat-input', '.message-input', '.im-chat-window'
-            ]
-
-            chat_found = False
-            for selector in chat_selectors:
-                try:
-                    chat_el = page.locator(selector).first
-                    if await chat_el.is_visible(timeout=1000):
-                        if logger:
-                            logger.info(f"[KEFU] Chat interface found: {selector}")
-                        chat_found = True
-                        break
-                except Exception:
-                    continue
-
-            if chat_found:
-                if logger:
-                    logger.info("[KEFU] Chat opened on same page")
-                return page
-            else:
-                if logger:
-                    logger.warning("[KEFU] No chat interface detected, but returning page")
-                return page
-
-        except Exception as e:
+            # Use the robust wait_for_chat_ready mechanism
             if logger:
-                logger.warning(f"[KEFU] Error checking for chat interface: {e}")
-            return page
+                logger.info("[KEFU] Waiting for chat interface to load...")
 
+            try:
+                await wait_for_chat_ready(page, timeout_s=25)
+                if logger:
+                    logger.info("[KEFU] Chat interface loaded successfully!")
+                return page
+
+            except RuntimeError as chat_error:
+                # Chat failed to load - provide specific error guidance
+                error_msg = f"Chat interface did not load after clicking kefu: {str(chat_error)}"
+                if logger:
+                    logger.error(f"[KEFU] {error_msg}")
+
+                # Provide actionable error message for retry logic
+                detailed_error = (
+                    f"Chat interface did not load after clicking kefu button '{clicked_selector}'. "
+                    f"The page may be loading slowly or the chat service might be unavailable. "
+                    f"Retry clicking kefu or reload the product page."
+                )
+                raise RuntimeError(detailed_error)
+
+        except RuntimeError:
+            # Re-raise our chat loading error
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error after clicking kefu: {str(e)}"
+            if logger:
+                logger.error(f"[KEFU] {error_msg}")
+            raise RuntimeError(error_msg)
+
+    except RuntimeError:
+        # Re-raise our known errors
+        raise
     except Exception as e:
+        error_msg = f"Unexpected error opening chat: {str(e)}"
         if logger:
-            logger.error(f"[KEFU] Error opening chat: {e}")
-        # Return the page anyway to allow continuation
-        return page
+            logger.error(f"[KEFU] {error_msg}")
+        raise RuntimeError(error_msg)
 
 # ========= Enhanced Chat Opening with Captcha Detection =========
 async def ensure_product_and_chat_open(page: Page, product_url: str, *, timeout_ms: int = 12000, logger=logger) -> dict:
@@ -1076,65 +1689,42 @@ async def ensure_product_and_chat_open(page: Page, product_url: str, *, timeout_
     try:
         logger.info(f"[CHAT] Ensuring product page and chat are ready for: {product_url}")
 
-        # Step 1: Check if we're on a captcha/traffic block page
+        # Step 1: Enhanced captcha/traffic block detection (including baxia-punish)
         if await is_captcha_or_traffic_block(page):
-            logger.warning("[CHAT] Captcha / unusual traffic page detected at %s", page.url)
+            logger.warning("[CHAT] Detected Alibaba captcha interception (baxia-punish) on product page: %s", page.url)
             return {
                 "ok": False,
-                "type": "captcha_block",
-                "reason": "Captcha / unusual-traffic page detected instead of product/chat",
+                "type": "blocked_by_captcha",
+                "reason": "Alibaba detected unusual traffic (baxia-punish captcha) on the product page. Please solve the slider captcha in the browser or change proxy, then click Retry.",
                 "url": page.url,
                 "kefu_count": 0,
                 "page": page
             }
 
-        # Step 2: Count kefu elements on the page
-        kefu_selectors = [
-            'od-text[i18n="wangwang"]',  # Primary selector for kefu button
-            'div._buttonWrap_1p2az_60 img[src*="O1CN01ZaHib31lWomw16ded"]',  # Backup
-            'text=联系供应商', 'text=客服', 'text=咨询',
-            'button:has-text("联系")', '[data-title*="客服"]',
-            '.contact-supplier', '.customer-service', '.im-chat', '.im-btn',
-            '[class*="kefu"]', '[class*="wangwang"]', '[class*="chat"]'
-        ]
+        # Step 2: Safely find kefu elements using new function
+        kefu_info = await find_kefu_on_product_page(page, logger)
 
-        kefu_count = 0
-        kefu_found_selector = None
-        for selector in kefu_selectors:
-            try:
-                kefu_elements = page.locator(selector)
-                count = await kefu_elements.count()
-                if count > 0:
-                    # Check if at least one is visible
-                    first_visible = False
-                    for i in range(count):
-                        try:
-                            if await kefu_elements.nth(i).is_visible(timeout=1000):
-                                kefu_count += 1
-                                first_visible = True
-                                break
-                        except Exception:
-                            continue
+        # Validate kefu_info structure (null-safe)
+        if not kefu_info or not isinstance(kefu_info, dict):
+            logger.warning("[CHAT] Invalid kefu_info returned from search function")
+            kefu_info = {"found": False, "selector": None, "count": 0, "first_visible": False, "elements": []}
 
-                    if first_visible and not kefu_found_selector:
-                        kefu_found_selector = selector
-                        # Only count visible elements for the primary count
-                        break
-            except Exception:
-                continue
-
-        # Use the specific selector from state_machine.py for accurate counting
+        # Get primary selector count for consistency
+        primary_kefu_count = 0
         try:
             primary_kefu_count = await page.locator("od-text[i18n='wangwang']").count()
-            if primary_kefu_count > 0:
-                kefu_count = primary_kefu_count
         except Exception:
             pass
 
-        logger.info(f"[CHAT] Found kefu elements: {kefu_count} using selector: {kefu_found_selector}")
+        # Use the found count or primary count (null-safe access)
+        kefu_count = kefu_info.get("count", 0) if kefu_info.get("found") else 0
+        if primary_kefu_count > 0:
+            kefu_count = primary_kefu_count
 
-        # Step 3: Handle different scenarios
-        if kefu_count == 0:
+        logger.info(f"[CHAT] Found kefu elements: {kefu_count} (info: found={kefu_info.get('found', False)})")
+
+        # Step 3: Handle different scenarios (null-safe)
+        if not kefu_info.get("found"):
             logger.warning("[CHAT] No kefu/chat entry found on product page: %s", page.url)
             return {
                 "ok": False,
@@ -1145,20 +1735,12 @@ async def ensure_product_and_chat_open(page: Page, product_url: str, *, timeout_
                 "page": page
             }
 
-        # Step 4: Try to click the kefu button to open chat
-        try:
-            # Use the selector that found elements
-            target_selector = kefu_found_selector if kefu_found_selector else 'od-text[i18n="wangwang"]'
-            kefu_btn = page.locator(target_selector).first
-            if await kefu_btn.is_visible(timeout=2000):
-                await kefu_btn.click()
-                logger.info(f"[CHAT] Clicked kefu button: {target_selector}")
-            else:
-                logger.warning(f"[CHAT] Kefu button found but not visible: {target_selector}")
-                # Still proceed - the element exists even if not immediately visible
-        except Exception as e:
-            logger.warning(f"[CHAT] Error clicking kefu button: {e}")
-            # Continue anyway - kefu elements exist
+        # Step 4: Safely click the kefu button (null-safe)
+        click_result = await click_kefu_safely(page, kefu_info, logger)
+        if not click_result or not isinstance(click_result, dict) or not click_result.get("success"):
+            click_reason = click_result.get("reason") if click_result and isinstance(click_result, dict) else "Unknown error"
+            logger.warning(f"[CHAT] Failed to click kefu button: {click_reason}")
+            # Continue anyway - kefu elements exist, we can try other methods
 
         # Step 5: Wait for potential chat interface to load
         await asyncio.sleep(2)
@@ -1299,9 +1881,22 @@ playwright_driver = SimpleNamespace(
     # New proxy tunnel error handling helpers
     reopen_page_without_proxy_and_reuse_cookies=reopen_page_without_proxy_and_reuse_cookies,
     is_proxy_tunnel_error=is_proxy_tunnel_error,
-    # New login detection helper
+    # Robust login detection helpers
     is_logged_in=is_logged_in,
+    wait_until_logged_in=wait_until_logged_in,
+    is_on_login_or_verify_page=is_on_login_or_verify_page,
+    has_logged_in_indicators=has_logged_in_indicators,
+    has_login_buttons_visible=has_login_buttons_visible,
+    has_logged_in_cookies=has_logged_in_cookies,
+    is_logged_in_url=is_logged_in_url,
+    # Enhanced 1688-specific login detection helpers
+    has_1688_auth_cookies=has_1688_auth_cookies,
+    has_1688_login_buttons_visible=has_1688_login_buttons_visible,
+    has_1688_dom_indicators=has_1688_dom_indicators,
     # New captcha detection and enhanced chat opening helpers
     is_captcha_or_traffic_block=is_captcha_or_traffic_block,
     ensure_product_and_chat_open=ensure_product_and_chat_open,
+    # Safe kefu detection functions
+    find_kefu_on_product_page=find_kefu_on_product_page,
+    click_kefu_safely=click_kefu_safely,
 )

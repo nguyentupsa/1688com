@@ -65,7 +65,7 @@ customer-support-agent.shopquantum.ai {
 	}
 }
 
-{$DOMAIN} {
+1688-negotiation-agent.shopquantum.ai {
 
     # API and backend routes - highest priority, no caching
     reverse_proxy /api/* backend:8000 {

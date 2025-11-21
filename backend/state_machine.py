@@ -327,6 +327,23 @@ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: s
                 logger=logger
             )
 
+            # Null-safe validation of chat_status
+            if not chat_status or not isinstance(chat_status, dict):
+                logger.error("[STATE] Invalid chat_status returned from ensure_product_and_chat_open")
+                # Emit WebSocket message
+                try:
+                    from app import manager
+                    import json
+                    await manager.broadcast(json.dumps({
+                        "phase": "blocked",
+                        "error_type": "chat_error",
+                        "message": "Error opening chat: Invalid response from chat detection system",
+                        "need_user_action": True
+                    }))
+                except Exception:
+                    pass
+                return
+
             if chat_status.get("ok"):
                 # chat_ready -> proceed as before
                 logger.info("[STATE] Chat is ready, continuing negotiation flow")
@@ -342,8 +359,24 @@ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: s
                 await _wait_gate("CONFIRM_PRODUCT_AND_CHAT", timeout=90)
             else:
                 status_type = chat_status.get("type")
-                if status_type == "captcha_block":
-                    # We hit a captcha or unusual-traffic page.
+                if status_type == "blocked_by_captcha":
+                    # We hit a captcha interception page.
+                    logger.error("[STATE] Blocked by Alibaba captcha interception at %s", chat_status.get("url"))
+                    # Emit WebSocket message
+                    try:
+                        from app import manager
+                        import json
+                        await manager.broadcast(json.dumps({
+                            "phase": "blocked",
+                            "error_type": "blocked_by_captcha",
+                            "message": "Alibaba blocked this product page due to unusual traffic. Please solve the slider captcha in the browser or change proxy, then click Retry."
+                        }))
+                    except Exception:
+                        pass
+                    # stay in the current state and do NOT auto-advance
+                    return
+                elif status_type == "captcha_block":
+                    # Legacy captcha detection (fallback)
                     logger.error("[STATE] Captcha / unusual-traffic block detected at %s", chat_status.get("url"))
                     # Emit WebSocket message
                     try:
@@ -393,7 +426,18 @@ async def start(product_url: str, opener_text: str, max_turns: int = 6, style: s
                     return
 
             # Đợi ô chat sẵn sàng (đã hỗ trợ <pre.edit contenteditable="true">)
-            await playwright_driver.wait_for_chat_ready(chat_page, timeout_s=25)
+            try:
+                await playwright_driver.wait_for_chat_ready(chat_page, timeout_s=25)
+                logger.info("[STATE] Chat interface is ready for messaging")
+            except RuntimeError as chat_error:
+                logger.error(f"[STATE] Chat interface failed to load: {str(chat_error)}")
+                _state["step"] = "S1_ERROR"
+                _save_session_snapshot()
+                raise RuntimeError(
+                    f"Chat interface did not load. The 1688 page may be loading slowly or the chat service is unavailable. "
+                    f"Please try refreshing the page and clicking the chat (客服) button manually, then retry. "
+                    f"Error details: {str(chat_error)}"
+                )
 
             # ===== S1: gửi opener do AI sinh =====
             # opener_text đã được tạo ở trên (generate_opener / từ config)
@@ -558,6 +602,11 @@ async def start_login_only():
         )
 
         # Handle login result for start_login_only
+        # Null-safe validation of login_result
+        if not login_result or not isinstance(login_result, dict):
+            logger.error("[STATE] Invalid login_result returned from login function")
+            raise RuntimeError("Login failed: Invalid response from login system")
+
         if not login_result.get("ok"):
             error_type = login_result.get("type")
             reason = login_result.get("reason")

@@ -15,8 +15,8 @@ services:
       - AUTO_ADVANCE_GATES=1
       - AUTO_ADVANCE_TIMEOUT=1.0
       # Nếu MẠNG có proxy, bỏ comment 3 dòng dưới và chỉnh thông số:
-      # - HTTP_PROXY=http://user:pass@proxy:port
-      # - HTTPS_PROXY=http://user:pass@proxy:port
+      # - HTTP_PROXY=http://nhocqn:sang789@svhn12.proxyno1.com:30603
+      # - HTTPS_PROXY=http://nhocqn:sang789@svhn12.proxyno1.com:30603
       # - NO_PROXY=localhost,127.0.0.1,*.local,*.docker.internal
     # ⭐ Thêm DNS công khai để container phân giải domain 1688/Taobao ổn định
     dns:
